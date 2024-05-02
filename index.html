@@ -3,285 +3,193 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tutoring Schedule</title>
+    <title>Summer Schedule</title>
     <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
     <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
     <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
     <div id="selects">
+        <input type="radio" id="first" name="session" value="first">
+        <label for="first">First Session</label>
+        <input type="radio" id="second" name="session" value="second">
+        <label for="second">Second Session</label>
+
         <label for="subject">Subject:</label>
         <select name="subject" id="subject">
-            <option value="">--Please choose an option--</option>
+            <option value="BIOL">Biology</option>
+            <option value="CHEM">Chemistry</option>
+            <option value="MATH">Math</option>
+            <option value="PHYS">Physics</option>
+            <option value="ENGR">Engineering</option>
         </select>
 
-        <label for="course">Course:</label>
-        <select name="course" id="course">
-            <option value="">--Please choose an option--</option>
-        </select>
-        <input type="checkbox" id="name" name="name" value="name">
-        <label for="name">Show Names</label><br>
+        <input type="checkbox" id="neg" name="neg" value="neg" checked>
+        <label for="neg">Negative Space</label><br>
     </div>
-        
+
     <py-config>
         {
-            "packages": ["numpy", "pandas"]
+            "packages": ["numpy", "pandas", "ipython"]
         }
     </py-config>
     <script type="py" id="pyimports">
-        from pyscript import display, window, document
+        from pyscript import display, window, document, HTML
         from pyweb import pydom
         from pyodide.http import open_url
         import pandas as pd
         import numpy as np
+        from math import floor, ceil
         import re, json, asyncio
         from pyodide.ffi import create_proxy, to_js
         from js import console
         pd.options.display.max_colwidth = None
-        from IPython.display import display, HTML
     </script> 
-    <script type="py" id="get_table">
-        def get_table(url):
-            # fetch data
-            res = open_url(url) 
+    <script type="py" id="parse-json">
+        def parse_json(json):
+            # create a preliminary dataframe
+            df = pd.DataFrame(json["values"])
+            df, df.columns = df[1:] , df.iloc[0]
 
-            # read response 
-            res_json = json.load(res) 
-            res.close()
-            
-            # create a dataframe from response
-            df = pd.DataFrame(res_json["values"]) 
-            df.columns = df.iloc[0]
-            df = df[1:]
-            df["Name"] = df["Name"].apply(lambda x: x.split("\n")[0].split("(")[0])           
+            # get the indices surrounding ilsands of courses
+            islands = df["CRN"].isna()
+            borders = [-1] + list(islands[islands].index-1) + [len(islands)]
 
-            return df
+            # return each island as a dataframe
+            for i, _ in enumerate(borders[:-1]):
+                # get island indices and island
+                lb, ub = borders[i] + 1, borders[i+1]
+                temp = df.iloc[lb:ub]
+
+                # filter island to relevant courses
+                temp = temp[(temp["COURSE_CAP"] != "0")&(temp["CAMPUS"] == "SUU")]
+
+                # return if there are any survivors in island
+                if len(temp) > 0:
+                    yield temp
     </script> 
     <div id="course_parsing">
-        <script type="py" id="parse_courses">
-        # this function parses the courses a tutor does into a list of tutor-course pairs
-        def parse_courses(tutor: str, raw_string: str) -> list[str]:
-            subject = ""
-            elements = re.findall(r'\w+',raw_string)
-            courses = []
-            for element in elements:
+        <script type="py" id="parse_hours">
+        def parse_hours(text_hours, negative_space = False):
+            begin, end = text_hours.split("-")
+            begin, end = int(begin) / 100.0, int(end) / 100.0 
+            begin, end = max(8, begin), min(end, 17)
 
-                new_subject = not bool(re.match(r'\d+', element))
-
-                if new_subject:
-                    subject = element
-                    continue
-
-                courses.append((tutor, subject, subject + ' ' + element.rjust(4, '0')))
-            return courses
+            if negative_space:
+                begin, end = ceil(begin), floor(end+0.55)
+                
+            else:
+                begin, end = floor(begin), ceil(end)
+            times = [(not negative_space if begin <= i < end else negative_space, i) for i in range(8, 17)]
+            
+            return times
         </script>
-        <script type="py" id="tutor_courses">
-            # this function generates a dataframe with tutor-course pairs
-            def tutor_courses(df):
-                # Get a list of lists with Tutor-Courses pairs where a pair existing represents the tutor can do that class
-                parsed_courses = df.apply(lambda df: parse_courses(df["Name"], df["Courses"]), axis = 1)
+        <script type="py" id="parse_schedule">
+            def parse_course_schedule(course, negative_space = False):
+                crn = course["CRN"]
+                days = [(day, (day in course["COURSE_DAYS"])^negative_space) for day in "MTWRF"]
+                times = parse_hours(course["COURSE_TIME"], negative_space=negative_space)
 
-                # Flatten list of lists
-                flatten_courses = [course for course_list in parsed_courses for course in course_list]
-
-                # create and return dataframe
-                return pd.DataFrame(flatten_courses, columns = ["Name", "Subject","Course"])
+                return [(crn, day, ongoing_time or ongoing_day if negative_space else ongoing_time and ongoing_day, time ) 
+                            for (day, ongoing_day) in days 
+                            for (ongoing_time, time) in times]
         </script>
     </div>
     <div id="schedule_parsing">
-        <script type="py" id="parse_hours">
-            # this function parses a string like "1:15-2:30" into a tuple like (13,15,14,30)
-            def parse_hours(text_shift):
-                begin, end = text_shift.split('-')
-
-                if ':' in begin:
-                    begin_h, begin_m = begin.split(':')
-                    begin_h, begin_m = int(begin_h), int(begin_m)
-                else:
-                    begin_h, begin_m = int(begin), 0
-
-                if begin_h < 9: begin_h += 12
-
-                if ':' in end:
-                    end_h, end_m = end.split(':')
-                    end_h, end_m = int(end_h), int(end_m)
-                else:
-                    end_h, end_m = int(end), 0
-
-                if end_h < 9: end_h += 12
-
-                return begin_h, begin_m, end_h, end_m
+        <script type="py" id="dataframe_schedule">
+            def normalized_course_schedules(courses, negative_space = False):
+                course_times = courses.apply(lambda df: parse_course_schedule(df, negative_space), axis=1)
+                flat_times = [time for course in course_times for time in course]
+                df_times = pd.DataFrame(flat_times, columns = ["CRN", "Day", "Ongoing", "Time"])
+                return df_times
         </script>
-        <script type="py" id="parse_shifts">
-            # this function parses a string like "1:15-2:30" into a list of 15 minute intervals 
-            # like [1:15, 1:30, 1:45, 2:00, 2:15]
-            def parse_shifts(text_shifts, shifts):
-                res = list()
-
-                for text_shift in text_shifts.split('\n'):
-                    if '~' in text_shift or len(text_shift) == 0 or text_shift.lower() == "closed":
-                        continue
-                    else:
-                        begin_h, begin_m, end_h, end_m = parse_hours(text_shift)
-                        begin_i = 4*(begin_h - 9) + begin_m // 15
-                        end_i = 4*(end_h - 9) + end_m // 15
-
-                        res.extend(shifts[begin_i:end_i])
-                return res
+        <script type="py" id="groupby=summary">
+            def summary(x):
+  
+                courses = "\n".join(np.where(x["Ongoing"], 
+                                                x["CRSE_NUM"] + " (" + x["ENROLLMENT"] + ")", 
+                                                " ")) 
+                total =  str(x.loc[x["Ongoing"] == True, "ENROLLMENT"].astype(int).sum())
+                return courses + "\n\nTotal: " + total
         </script>
-        <script type="py" id="parse_all_shifts">
-            # this function creates a list of tutor-day-15minint for a given tutor
-            def parse_all_shifts(tutor, schedules, shifts, days):
-                res = list()
-                res = [(tutor, day, shift) 
-                        for day, sch in zip(days,schedules) if sch  
-                        for shift in parse_shifts(sch, shifts)]
-                return res
+        <script type="py" id="schedulize">
+            def schedulize(courses, negative_space = False):
+                return normalized_course_schedules(courses, negative_space) \
+                    .merge(courses[["CRN", "CRSE_NUM", "ENROLLMENT"]], how="left", on="CRN") \
+                    .groupby(by=["Day", "Time"], as_index=False) \
+                    .apply(summary) \
+                    .rename(columns={None:"CourseSummary"}) \
+                    .pivot(index='Time', columns='Day', values='CourseSummary') \
+                    [["M", "T", "W", "R", "F"]]
         </script>
-        <script type="py" id="tutor_shifts">
-            # this function creates a list of tutor-day-15minint for a given tutor
-            def tutor_shifts(df, shifts, days):
-                tutor_shifts = df.apply(lambda df: parse_all_shifts(df["Name"], df[2:7], shifts, days), axis=1)
-                ts_flatten = [shift for tutor in tutor_shifts for shift in tutor]
-                return pd.DataFrame(ts_flatten, columns = ["Name", "Day", "Shift"])
+        <script type="py" id="init">
+            def init():
+                # get data
+                url_full = open_url('https://sheets.googleapis.com/v4/spreadsheets/1aLMaL-GjAhXsYo1785RI4OTC2i6gSCkvlQU6NKf6v0Q/values/Full%20Term/?key=AIzaSyAeJiHgfVDUgoZ3cHdWR7YP_ozeRnH45wI')
+                url_first = open_url('https://sheets.googleapis.com/v4/spreadsheets/1aLMaL-GjAhXsYo1785RI4OTC2i6gSCkvlQU6NKf6v0Q/values/1st%20Term/?key=AIzaSyAeJiHgfVDUgoZ3cHdWR7YP_ozeRnH45wI')
+                url_second = open_url('https://sheets.googleapis.com/v4/spreadsheets/1aLMaL-GjAhXsYo1785RI4OTC2i6gSCkvlQU6NKf6v0Q/values/2nd%20Term/?key=AIzaSyAeJiHgfVDUgoZ3cHdWR7YP_ozeRnH45wI')
+
+                json_full = json.load(url_full)
+                json_first = json.load(url_first)
+                json_second = json.load(url_second)
+
+                url_full.close()
+                url_first.close()
+                url_second.close()
+
+                # raw parse
+                full_parsed = {course.iloc[0]["SUBJ"]: course for course in parse_json(json_full)}
+                first_parsed = {course.iloc[0]["SUBJ"]: course for course in parse_json(json_first)}
+                second_parsed = {course.iloc[0]["SUBJ"]: course for course in parse_json(json_second)}
+
+                # combine by term
+                combine = lambda dict1, dict2, key: pd.concat([dict1.get(key, pd.DataFrame()), dict2.get(key, pd.DataFrame())])
+                first_half = {key: combine(full_parsed, first_parsed, key) for key in set(full_parsed) | set(first_parsed)}
+                second_half = {key: combine(full_parsed, second_parsed, key) for key in set(full_parsed) | set(second_parsed)}
+
+                # get schedules
+                schedules_first_negative = {key:schedulize(value, True) for key, value in first_half.items()}
+                schedules_second_negative = {key:schedulize(value, True) for key, value in second_half.items()}
+                schedules_first_positive = {key:schedulize(value, False) for key, value in first_half.items()}
+                schedules_second_positive = {key:schedulize(value, False) for key, value in second_half.items()}
+
+                return {"pos": {
+                            "first": schedules_first_positive, 
+                            "second": schedules_second_positive 
+                        },
+                        "neg": {
+                            "first": schedules_first_negative, 
+                            "second": schedules_second_negative 
+                        }          
+                        }
         </script>
     </div>
     <div id="table_creation">
-        <script type="py" id="coverage">
-            # aggregates data to get coverage by course and by subject
-            def coverage(df_tcs):
-                # by course
-                df_coverage_course = df_tcs.groupby(by=["Course", "Day", "Shift"], as_index=False).count()
-                df_coverage_course["People"] = df_tcs.groupby(by=["Course", "Day", "Shift"], as_index=False).apply(lambda x: ", ".join(x["Name"])).iloc[:,3] 
-                names = list(df_coverage_course.columns)
-                names[3] = "TutorCount"
-                df_coverage_course.columns = names
-
-                # by subject
-                df_coverage_subject = df_tcs.groupby(by=["Subject", "Day", "Shift"], as_index=False).nunique()
-                df_coverage_subject["People"] = df_tcs.groupby(by=["Subject", "Day", "Shift"], as_index=False).apply(lambda x: ", ".join(x["Name"].unique())).iloc[:,3] 
-                names = list(df_coverage_subject.columns)
-                names[3] = "TutorCount"
-                df_coverage_subject.columns = names
-
-                return df_coverage_course, df_coverage_subject
-
-        </script>
-        <script type="py" id="coverage-schedule">
-            # filters data to generate a more user-friendly schedule
-            def coverage_schedule(df_tcs, shifts, subject, course, names):
-                df_coverage_course, df_coverage_subject= coverage(df_tcs)
-                shift_order = {s:i for i,s in enumerate(shifts)}
-
-                if subject is None or subject == '':
-                    return None
-                elif course is None and names == True:
-                    schedule = df_coverage_subject[df_coverage_subject["Subject"] == subject] \
-                                                .pivot(index='Shift', columns='Day', values='People') \
-                                                .fillna('')
-                elif course is None and names == False:
-                    schedule = df_coverage_subject[df_coverage_subject["Subject"] == subject] \
-                                                .pivot(index='Shift', columns='Day', values='TutorCount') \
-                                                .fillna(0).astype(np.int32)
-                elif course is not None and names == True:
-                    schedule = df_coverage_course[df_coverage_course["Course"] == course] \
-                                                .pivot(index='Shift', columns='Day', values='People') \
-                                                .fillna('')
-                elif course is not None and names == False:
-                    schedule = df_coverage_course[df_coverage_course["Course"] == course] \
-                                                .pivot(index='Shift', columns='Day', values='TutorCount') \
-                                                .fillna(0).astype(np.int32)
-                else:
-                    return None
-
-
-                for day in days:
-                    if day in schedule:
-                        continue
-                    
-                    elif names:
-                        schedule[day] = ''
-                    else:
-                        schedule[day] = 0
-
-                schedule_t = schedule.T
-                
-                for shift in shifts:
-                    if shift in schedule_t:
-                        continue
-                    elif names:
-                        schedule_t[shift] = ''
-                    else:
-                        schedule_t[shift] = 0
-
-                schedule = schedule_t.T
-
-                schedule.columns = list(schedule.columns)
-                schedule.index = list(schedule.index)
-                schedule = schedule[days].sort_index(key = lambda x: x.map(shift_order))[::4]
-                
-                return schedule
-
-        </script>
-        <script type="py" id="update-table">
-            def on_input(df_tcs, shifts, event):
+            <script type="py" id="update-table">
+            def on_input(master, event):
                 
                 subject = document.querySelector("#subject").value
-                course = document.querySelector("#course").value
-                name = document.querySelector("#name").checked
+                session = document.querySelector('input[name="session"]').value
+                space = "neg" if document.querySelector("#neg").checked else "pos"
 
-                if course == '':
-                    course = None
-
-                if event.srcElement.id == 'subject':
-                    course = None
-
-                    course_opt = ['--Please choose an option--'] + sorted(list(df_tc.loc[df_tc["Subject"] == subject, "Course" ].unique()))
-                    document.querySelector("#course").innerHTML = ''
-
-                    for option in course_opt:
-                        element = document.createElement("option")
-                        element.value = '' if option == '--Please choose an option--' else option
-                        element.text = option
-                        document.querySelector("#course").appendChild(element)
+                schedule = master[space][session][subject]
                 
                 if document.querySelector(".dataframe") is not None:
                     document.querySelector(".dataframe").parentNode.innerHTML = ''
 
-
-                schedule = coverage_schedule(df_tcs, shifts, subject, course, name)
-
                 if schedule is not None:
-                    display(schedule) 
+                    display(HTML ( schedule.to_html().replace("\\n","<br>") ) ) 
         </script>
     </div>
     <script type="py" id="main">
-        url = 'https://sheets.googleapis.com/v4/spreadsheets/1lr9EJ9kU9-Z58_gMn3Z-E9DY1YMB1k7VYguNBvao3wg/values/Combo%20Tab/?key=AIzaSyAeJiHgfVDUgoZ3cHdWR7YP_ozeRnH45wI'
-        
-        days = ['M','T','W','R','F']
-        hours = [9,10,11,12,1,2,3,4,5,6,7]
-        mins = [0,15,30,45]
+        master = init()
 
-        shifts = [f'{hour}:{min}' for hour in hours[:-1] for min in mins]
-        
-        df =  get_table(url)
-        df_tc = tutor_courses(df)
-        df_ts = tutor_shifts(df, shifts, days)
-        df_tcs = df_tc.merge(df_ts, on="Name") 
-
-        subject_opt = ['--Please choose an option--'] + sorted(list(df_tc["Subject"].unique()))
-        for option in sorted(list(df_tc["Subject"].unique())):
-            element = document.createElement("option")
-            element.value = option
-            element.text = option
-            document.querySelector("#subject").appendChild(element)
-
-
-        read_input = create_proxy(lambda e: on_input(df_tcs, shifts, e))
+        read_input = create_proxy(lambda e: on_input(master, e))
 
         document.querySelector("#subject").oninput = read_input
-        document.querySelector("#course").oninput = read_input
-        document.querySelector("#name").oninput = read_input
+        document.querySelector("#first").oninput = read_input
+        document.querySelector("#second").oninput = read_input
+        document.querySelector("#neg").oninput = read_input
         
     </script>
     
